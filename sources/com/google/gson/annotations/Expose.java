@@ -1,0 +1,17 @@
+package com.google.gson.annotations;
+
+import java.lang.annotation.Documented;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+
+/* JADX INFO: loaded from: leonware-0.0.3.jar:com/google/gson/annotations/Expose.class */
+@Target({ElementType.FIELD})
+@Documented
+@Retention(RetentionPolicy.RUNTIME)
+public @interface Expose {
+    boolean serialize() default true;
+
+    boolean deserialize() default true;
+}

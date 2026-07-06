@@ -1,0 +1,458 @@
+package org.newsclub.net.unix;
+
+import java.io.FileDescriptor;
+import java.io.IOException;
+import java.net.DatagramPacket;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.SocketAddress;
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
+import java.nio.ByteBuffer;
+import java.nio.channels.ClosedChannelException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.newsclub.net.unix.AFSocketAddress;
+
+/* JADX INFO: loaded from: leonware-0.0.3.jar:org/newsclub/net/unix/AFDatagramSocketImpl.class */
+public abstract class AFDatagramSocketImpl<A extends AFSocketAddress> extends DatagramSocketImplShim {
+    private final AFSocketType socketType;
+    private final AFSocketCore core;
+    private int localPort;
+    private final AFAddressFamily<A> addressFamily;
+    final AncillaryDataSupport ancillaryDataSupport = new AncillaryDataSupport();
+    private final AtomicBoolean connected = new AtomicBoolean(false);
+    private final AtomicBoolean bound = new AtomicBoolean(false);
+    private final AtomicInteger socketTimeout = new AtomicInteger(0);
+    private int remotePort = 0;
+    private AFSocketImplExtensions<A> implExtensions = null;
+
+    protected AFDatagramSocketImpl(AFAddressFamily<A> addressFamily, FileDescriptor fd, AFSocketType socketType) {
+        this.addressFamily = addressFamily;
+        this.socketType = socketType;
+        this.core = new AFSocketCore(this, fd, this.ancillaryDataSupport, getAddressFamily(), true);
+        this.fd = this.core.fd;
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    protected final void create() throws SocketException {
+        if (isClosed()) {
+            throw new SocketException("Already closed");
+        }
+        if (this.fd.valid()) {
+            return;
+        }
+        try {
+            NativeUnixSocket.createSocket(this.fd, getAddressFamily().getDomain(), this.socketType.getId());
+        } catch (SocketException e) {
+            throw e;
+        } catch (IOException e2) {
+            throw ((SocketException) new SocketException(e2.getMessage()).initCause(e2));
+        }
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    protected final void close() {
+        this.core.runCleaner();
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    protected final void connect(InetAddress address, int port) throws SocketException {
+    }
+
+    final void connect(AFSocketAddress socketAddress) throws IOException {
+        if (socketAddress == AFSocketAddress.INTERNAL_DUMMY_CONNECT) {
+            return;
+        }
+        ByteBuffer ab = socketAddress.getNativeAddressDirectBuffer();
+        NativeUnixSocket.connect(ab, ab.limit(), this.fd, -1L);
+        this.remotePort = socketAddress.getPort();
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    protected final void disconnect() {
+        try {
+            NativeUnixSocket.disconnect(this.fd);
+            this.connected.set(false);
+            this.remotePort = 0;
+        } catch (IOException e) {
+            StackTraceUtil.printStackTrace(e);
+        }
+    }
+
+    final AFSocketCore getCore() {
+        return this.core;
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    protected final FileDescriptor getFileDescriptor() {
+        return this.core.fd;
+    }
+
+    final boolean isClosed() {
+        return this.core.isClosed();
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    protected final void bind(int lport, InetAddress laddr) throws SocketException {
+    }
+
+    final void bind(AFSocketAddress socketAddress) throws SocketException {
+        ByteBuffer ab;
+        if (socketAddress == AFSocketAddress.INTERNAL_DUMMY_BIND) {
+            return;
+        }
+        try {
+            if (socketAddress == null) {
+                ab = AFSocketAddress.getNativeAddressDirectBuffer(0);
+            } else {
+                ab = socketAddress.getNativeAddressDirectBuffer();
+            }
+            NativeUnixSocket.bind(ab, ab.limit(), this.fd, 16);
+            if (socketAddress == null) {
+                this.localPort = 0;
+                this.bound.set(false);
+            } else {
+                this.localPort = socketAddress.getPort();
+            }
+        } catch (SocketException e) {
+            throw e;
+        } catch (IOException e2) {
+            throw ((SocketException) new SocketException(e2.getMessage()).initCause(e2));
+        }
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    protected final void receive(DatagramPacket p) throws IOException {
+        recv(p, 0);
+    }
+
+    private void recv(DatagramPacket p, int options) throws IOException {
+        int len = p.getLength();
+        FileDescriptor fdesc = this.core.validFdOrException();
+        ByteBuffer datagramPacketBuffer = this.core.getThreadLocalDirectByteBuffer(len);
+        int len2 = Math.min(len, datagramPacketBuffer.capacity());
+        int i = this.core.isBlocking() ? 0 : 4;
+        ByteBuffer socketAddressBuffer = AFSocketAddress.SOCKETADDRESS_BUFFER_TL.get();
+        int count = NativeUnixSocket.receive(fdesc, datagramPacketBuffer, 0, len2, socketAddressBuffer, options | i, this.ancillaryDataSupport, this.socketTimeout.get());
+        if (count > len2) {
+            throw new IllegalStateException("count > len: " + count + " > " + len2);
+        }
+        if (count == -1) {
+            throw new SocketTimeoutException();
+        }
+        if (count < 0) {
+            throw new IllegalStateException("count: " + count + " < 0");
+        }
+        datagramPacketBuffer.limit(count);
+        datagramPacketBuffer.rewind();
+        datagramPacketBuffer.get(p.getData(), p.getOffset(), count);
+        p.setLength(count);
+        AFSocketAddress aFSocketAddressOfInternal = AFSocketAddress.ofInternal(socketAddressBuffer, getAddressFamily());
+        p.setAddress(aFSocketAddressOfInternal == null ? null : aFSocketAddressOfInternal.getInetAddress());
+        p.setPort(this.remotePort);
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    protected final void send(DatagramPacket p) throws IOException {
+        byte[] addrBytes;
+        InetAddress addr = p.getAddress();
+        ByteBuffer sendToBuf = null;
+        int sendToBufLen = 0;
+        if (addr != null && (addrBytes = AFInetAddress.unwrapAddress(addr, (AFAddressFamily<?>) getAddressFamily())) != null) {
+            sendToBuf = AFSocketAddress.SOCKETADDRESS_BUFFER_TL.get();
+            sendToBufLen = NativeUnixSocket.bytesToSockAddr(getAddressFamily().getDomain(), sendToBuf, addrBytes);
+            sendToBuf.position(0);
+            if (sendToBufLen == -1) {
+                throw new SocketException("Unsupported domain");
+            }
+        }
+        FileDescriptor fdesc = this.core.validFdOrException();
+        int len = p.getLength();
+        ByteBuffer datagramPacketBuffer = this.core.getThreadLocalDirectByteBuffer(len);
+        datagramPacketBuffer.clear();
+        datagramPacketBuffer.put(p.getData(), p.getOffset(), p.getLength());
+        datagramPacketBuffer.flip();
+        NativeUnixSocket.send(fdesc, datagramPacketBuffer, 0, len, sendToBuf, sendToBufLen, 16, this.ancillaryDataSupport);
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    protected final int peek(InetAddress i) throws IOException {
+        throw new SocketException("Unsupported operation");
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    protected final int peekData(DatagramPacket p) throws IOException {
+        recv(p, 2);
+        return 0;
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    @Deprecated
+    protected final byte getTTL() throws IOException {
+        return (byte) (getTimeToLive() & 255);
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    @Deprecated
+    protected final void setTTL(byte ttl) throws IOException {
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    protected final int getTimeToLive() throws IOException {
+        return 0;
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    protected final void setTimeToLive(int ttl) throws IOException {
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    protected final void join(InetAddress inetaddr) throws IOException {
+        throw new SocketException("Unsupported");
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    protected final void leave(InetAddress inetaddr) throws IOException {
+        throw new SocketException("Unsupported");
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    protected final void joinGroup(SocketAddress mcastaddr, NetworkInterface netIf) throws IOException {
+        throw new SocketException("Unsupported");
+    }
+
+    @Override // java.net.DatagramSocketImpl
+    protected final void leaveGroup(SocketAddress mcastaddr, NetworkInterface netIf) throws IOException {
+        throw new SocketException("Unsupported");
+    }
+
+    @Override // java.net.SocketOptions
+    public Object getOption(int optID) throws SocketException {
+        if (isClosed()) {
+            throw new SocketException("Socket is closed");
+        }
+        FileDescriptor fdesc = this.core.validFdOrException();
+        return AFSocketImpl.getOptionDefault(fdesc, optID, this.socketTimeout, getAddressFamily());
+    }
+
+    @Override // java.net.SocketOptions
+    public void setOption(int optID, Object value) throws SocketException {
+        if (isClosed()) {
+            throw new SocketException("Socket is closed");
+        }
+        FileDescriptor fdesc = this.core.validFdOrException();
+        AFSocketImpl.setOptionDefault(fdesc, optID, value, this.socketTimeout);
+    }
+
+    final A receive(ByteBuffer byteBuffer) throws IOException {
+        try {
+            return (A) this.core.receive(byteBuffer);
+        } catch (SocketClosedException e) {
+            throw ((ClosedChannelException) new ClosedChannelException().initCause(e));
+        }
+    }
+
+    final int send(ByteBuffer src, SocketAddress target) throws IOException {
+        try {
+            return this.core.write(src, target, 0);
+        } catch (SocketClosedException e) {
+            throw ((ClosedChannelException) new ClosedChannelException().initCause(e));
+        }
+    }
+
+    final int read(ByteBuffer dst, ByteBuffer socketAddressBuffer) throws IOException {
+        try {
+            return this.core.read(dst, socketAddressBuffer, 0);
+        } catch (SocketClosedException e) {
+            throw ((ClosedChannelException) new ClosedChannelException().initCause(e));
+        }
+    }
+
+    final int write(ByteBuffer src) throws IOException {
+        try {
+            return this.core.write(src);
+        } catch (SocketClosedException e) {
+            throw ((ClosedChannelException) new ClosedChannelException().initCause(e));
+        }
+    }
+
+    final boolean isConnected() {
+        if (this.connected.get()) {
+            return true;
+        }
+        if (!isClosed() && this.core.isConnected(false)) {
+            this.connected.set(true);
+            return true;
+        }
+        return false;
+    }
+
+    final boolean isBound() {
+        if (this.bound.get()) {
+            return true;
+        }
+        if (!isClosed() && this.core.isConnected(true)) {
+            this.bound.set(true);
+            return true;
+        }
+        return false;
+    }
+
+    final void updatePorts(int local, int remote) {
+        this.localPort = local;
+        this.remotePort = remote;
+    }
+
+    final A getLocalSocketAddress() {
+        return (A) AFSocketAddress.getSocketAddress(getFileDescriptor(), false, this.localPort, getAddressFamily());
+    }
+
+    final A getRemoteSocketAddress() {
+        return (A) AFSocketAddress.getSocketAddress(getFileDescriptor(), true, this.remotePort, getAddressFamily());
+    }
+
+    protected final AFAddressFamily<A> getAddressFamily() {
+        return this.addressFamily;
+    }
+
+    protected final synchronized AFSocketImplExtensions<A> getImplExtensions() {
+        if (this.implExtensions == null) {
+            this.implExtensions = this.addressFamily.initImplExtensions(this.ancillaryDataSupport);
+        }
+        return this.implExtensions;
+    }
+
+    final boolean accept0(AFDatagramSocketImpl<A> socket) throws IOException {
+        FileDescriptor fdesc = this.core.validFdOrException();
+        if (isClosed()) {
+            throw new SocketException("Socket is closed");
+        }
+        if (!isBound()) {
+            throw new SocketException("Socket is not bound");
+        }
+        AFSocketAddress socketAddress = this.core.socketAddress;
+        AFSocketAddress boundSocketAddress = getLocalSocketAddress();
+        if (boundSocketAddress != null) {
+            socketAddress = boundSocketAddress;
+            this.core.socketAddress = boundSocketAddress;
+        }
+        if (socketAddress == null) {
+            throw new SocketException("Socket is not bound");
+        }
+        this.core.incPendingAccepts();
+        try {
+            ByteBuffer ab = socketAddress.getNativeAddressDirectBuffer();
+            try {
+            } catch (SocketException e) {
+                if (!isBound() || isClosed()) {
+                    if (getCore().isShutdownOnClose()) {
+                        try {
+                            NativeUnixSocket.shutdown(socket.fd, 2);
+                        } catch (Exception e2) {
+                        }
+                    }
+                    try {
+                        NativeUnixSocket.close(socket.fd);
+                    } catch (Exception e3) {
+                    }
+                    if (e != null) {
+                        throw e;
+                    }
+                    throw new SocketClosedException("Socket is closed");
+                }
+                if (e != null) {
+                    throw e;
+                }
+            } catch (Throwable th) {
+                if (isBound() && !isClosed()) {
+                    if (0 != 0) {
+                        throw null;
+                    }
+                    throw th;
+                }
+                if (getCore().isShutdownOnClose()) {
+                    try {
+                        NativeUnixSocket.shutdown(socket.fd, 2);
+                    } catch (Exception e4) {
+                    }
+                }
+                try {
+                    NativeUnixSocket.close(socket.fd);
+                } catch (Exception e5) {
+                }
+                if (0 != 0) {
+                    throw null;
+                }
+                throw new SocketClosedException("Socket is closed");
+            }
+            if (!NativeUnixSocket.accept(ab, ab.limit(), fdesc, socket.fd, this.core.inode.get(), this.socketTimeout.get())) {
+                if (isBound() && !isClosed()) {
+                    if (0 != 0) {
+                        throw null;
+                    }
+                    return false;
+                }
+                if (getCore().isShutdownOnClose()) {
+                    try {
+                        NativeUnixSocket.shutdown(socket.fd, 2);
+                    } catch (Exception e6) {
+                    }
+                }
+                try {
+                    NativeUnixSocket.close(socket.fd);
+                } catch (Exception e7) {
+                }
+                if (0 != 0) {
+                    throw null;
+                }
+                throw new SocketClosedException("Socket is closed");
+            }
+            if (!isBound() || isClosed()) {
+                if (getCore().isShutdownOnClose()) {
+                    try {
+                        NativeUnixSocket.shutdown(socket.fd, 2);
+                    } catch (Exception e8) {
+                    }
+                }
+                try {
+                    NativeUnixSocket.close(socket.fd);
+                } catch (Exception e9) {
+                }
+                if (0 != 0) {
+                    throw null;
+                }
+                throw new SocketClosedException("Socket is closed");
+            }
+            if (0 != 0) {
+                throw null;
+            }
+            this.core.decPendingAccepts();
+            socket.setSocketAddress(socketAddress);
+            socket.connected.set(true);
+            return true;
+        } finally {
+            this.core.decPendingAccepts();
+        }
+    }
+
+    final int getLocalPort1() {
+        return this.localPort;
+    }
+
+    final int getRemotePort() {
+        return this.remotePort;
+    }
+
+    final void setSocketAddress(AFSocketAddress socketAddress) {
+        if (socketAddress == null) {
+            this.core.socketAddress = null;
+            this.localPort = -1;
+        } else {
+            this.core.socketAddress = socketAddress;
+            if (this.localPort <= 0) {
+                this.localPort = socketAddress.getPort();
+            }
+        }
+    }
+}

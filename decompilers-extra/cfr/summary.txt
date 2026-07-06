@@ -1,0 +1,40 @@
+Summary for /home/nprevenant/Загрузки/Telegram Desktop/leonware-0.0.3.jar
+Decompiled with CFR 0.152
+
+
+org.newsclub.net.unix.NativeLibraryLoader
+----------------------------
+
+load()
+  Unable to fully structure code
+  Unable to fully structure code
+  Unable to fully structure code
+  Unable to fully structure code
+
+
+com.google.gson.internal.$Gson$Types
+----------------------------
+
+resolve(java.lang.reflect.Type java.lang.Class<?> java.lang.reflect.Type java.util.Map<java.lang.reflect.TypeVariable<?>, java.lang.reflect.Type> )
+  Unable to fully structure code
+
+
+org.newsclub.net.unix.NativeLibraryLoader
+----------------------------
+
+load()
+  Unable to fully structure code
+
+
+sweetie.leonware.client.ui.widget.overlay.TargetInfoWidget
+----------------------------
+
+renderSk3d(net.minecraft.class_4587 float float float int float float )
+  Unable to fully structure code
+
+
+sweetie.leonware.inject.render.MixinLivingEntityRenderer
+----------------------------
+
+onRenderCustomModelPre(S net.minecraft.class_4587 net.minecraft.class_4597 int org.spongepowered.asm.mixin.injection.callback.CallbackInfo )
+  Unable to fully structure code
